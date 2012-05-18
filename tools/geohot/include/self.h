@@ -56,8 +56,8 @@ typedef struct {
   u32 unknown2;
   u32 magic;       // 0x4E504400(NPD)
   u32 unknown3;    // this is 1
-  u32 unknown4;    // this is 3
-  u32 unknown5;    // this is 1
+  u32 license;    // 1 network, 2 local, 3 free
+  u32 type;    //  1 exec, 21 update
   u8 titleid[0x30];
   u8 hash_unknown[0x10];
   u8 hash1[0x10];

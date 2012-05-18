@@ -72,10 +72,19 @@ u8 sdkversion_static[] = {
   //0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x00
 };
 
+u8* npdrm_keypair;
 
 AES_KEY aes_key;
 
 u8* input_elf_data;
+u8* input_self_data;
+
+
+void print_hash(u8 *ptr, u32 len)
+{
+	while(len--)
+		printf(" %02x", *ptr++);
+}
 
 #define ZLIB_LEVEL 6
 #define DEFLATION_BUFFER_SIZE 0x1000000
@@ -110,9 +119,9 @@ void init_Self_Shdr(Self_Shdr* hdr) {
   set_u32(&(hdr->s_hdrversion), 2);
 #ifdef SPRX
   // on 3.41
-  //set_u16(&(hdr->s_flags), 4);
+  set_u16(&(hdr->s_flags), 4);
   // on 3.55
-  set_u16(&(hdr->s_flags), 7);
+  //set_u16(&(hdr->s_flags), 7);
 #else
   set_u16(&(hdr->s_flags), 1);
 #endif
@@ -128,18 +137,19 @@ void init_Self_Ihdr(Self_Ihdr* hdr) {
   set_u64(&(hdr->i_authid), 0x1070000052000001LL);
 #else
   //set_u64(&(hdr->i_authid), 0x10700003FD000001LL);
-  set_u64(&(hdr->i_authid), 0x10700003FF000001LL);
+  //set_u64(&(hdr->i_authid), 0x10700003FF000001LL);
+  set_u64(&(hdr->i_authid), 0x1010000001000003LL);
 #endif
   set_u32(&(hdr->i_apptype), 4);
 #endif
   //set_u64(&(hdr->i_authid), 0x1070000500000001LL);
 
   set_u32(&(hdr->i_magic), 0x01000002);
-  set_u64(&(hdr->i_version), 0x0003005500000000LL);
+  //set_u64(&(hdr->i_version), 0x0003005500000000LL);
   //set_u64(&(hdr->i_version), 0x0003004000000000LL);
   //set_u64(&(hdr->i_version), 0x0003000000000000LL);
   //set_u64(&(hdr->i_version), 0x0001004000001000LL);
-  //set_u64(&(hdr->i_version), 0x0001000000000000LL);
+  set_u64(&(hdr->i_version), 0x0001000000000000LL);
 }
 
 void init_Self_Ehdr(Self_Ehdr* hdr) {
@@ -163,6 +173,29 @@ void read_elf_file(char* filename) {
   fclose(input_elf_file);
 }
 
+int input_self_len;
+
+void read_self_file(char* filename) {
+  FILE *input_self_file = fopen(filename, "rb");
+  fseek(input_self_file, 0, SEEK_END);
+  input_self_len = ftell(input_self_file);
+  fseek(input_self_file, 0, SEEK_SET);
+  input_self_data = (u8*)malloc(input_self_len);
+  fread(input_self_data, 1, input_self_len, input_self_file);
+  fclose(input_self_file);
+}
+
+void read_keypair(char* filename) {
+  int input_len;
+  FILE *input_file = fopen(filename, "rb");
+  fseek(input_file, 0, SEEK_END);
+  input_len = ftell(input_file);
+  fseek(input_file, 0, SEEK_SET);
+  npdrm_keypair = (u8*)malloc(input_len);
+  fread(npdrm_keypair, 1, 0x40, input_file);
+  fclose(input_file);
+}
+
 gmp_randstate_t r_state;
 
 Elf64_Ehdr* input_elf_header;
@@ -183,7 +216,7 @@ void enumerate_segments() {
   for(i=0;i<get_u16(&(input_elf_header->e_phnum));i++) {
     
     memset(segment_ptr, 0, sizeof(Self_Segment));
-
+ printf("i %d com %d enc %d   \n", i , segment_ptr->enc_segment.segment_compressed_flag, segment_ptr->enc_segment.segment_crypt_flag); fflush(stdout);
 // these are choices you can make
     /*segment_ptr->compressed = (i<2);
     segment_ptr->incrypt = (i<6); // **TESTING
@@ -193,12 +226,16 @@ void enumerate_segments() {
     segment_ptr->encrypted = (i<5);
     segment_ptr->compressed = (i<4);
     segment_ptr->incrypt = (i<7);
+  #ifdef NPDRM2
+    segment_ptr->compressed = 0;
+  #endif
 #else
     segment_ptr->encrypted = 1;
     segment_ptr->compressed = 1;
     segment_ptr->incrypt = 1;
 #endif
     
+
     set_u32(&(segment_ptr->enc_segment.segment_number), i);
 
     set_u32(&(segment_ptr->enc_segment.unknown2), 2);
@@ -289,8 +326,8 @@ void init_Self_NPDRM(Self_NPDRM* npdrm, char* titleid, char* filename) {
   set_u32(&npdrm->block_size, sizeof(Self_NPDRM));
   set_u32(&npdrm->magic, 0x4E504400);
   set_u32(&npdrm->unknown3, 1);
-  set_u32(&npdrm->unknown4, 3);
-  set_u32(&npdrm->unknown5, 1);
+  set_u32(&npdrm->license, 3); // free
+  set_u32(&npdrm->type, 1); // exec TODO take from original
   strncpy(npdrm->titleid, titleid, 0x30);
 
   char *true_filename = strrchr(filename,'/');
@@ -384,15 +421,23 @@ int main(int argc, char* argv[]) {
   memset(zero_padding, 0, sizeof(zero_padding));
 
 #ifdef NPDRM
-  if(argc < 3) {
-    printf("usage: %s input.elf output.self <content_id>\n", argv[0]);
-    printf("  warning NPDRM cares about the output file name, do not rename\n");
-    return -1;
-  }
+  #ifdef NPDRM2
+    if(argc < 5) {
+     printf("usage: %s input.elf output.self input.bin keypair\n", argv[0]);
+     printf("  warning NPDRM cares about the output file name, do not rename\n");
+     return 1;
+   }
+  #else
+    if(argc < 4) {
+     printf("usage: %s input.elf output.self <content_id>\n", argv[0]);
+     printf("  warning NPDRM cares about the output file name, do not rename\n");
+     return 1;
+   }
+  #endif
 #else
-  if(argc < 2) {
+  if(argc < 3) {
     printf("usage: %s input.elf output.self\n", argv[0]);
-    return -1;
+    return 1;
   }
 #endif
 
@@ -430,7 +475,15 @@ int main(int argc, char* argv[]) {
 // NPDRM
 #ifdef NPDRM
   Self_NPDRM npdrm; memset(&npdrm, 0, sizeof(npdrm));
-  init_Self_NPDRM(&npdrm, argv[3], argv[2]);
+  #ifdef NPDRM2
+    Self_NPDRM* npdrm_orig;
+    read_self_file(argv[3]);
+    read_keypair(argv[4]);
+    npdrm_orig = (Self_NPDRM*)(input_self_data + 0x0430); // Offset - 0x60 (0x4A0 - 0x70)
+    init_Self_NPDRM(&npdrm, npdrm_orig->titleid, argv[2]);
+  #else
+    init_Self_NPDRM(&npdrm, argv[3], argv[2]);
+  #endif
 #endif
 // useless bullshit
   Self_SDKversion sdkversion;
@@ -441,6 +494,10 @@ int main(int argc, char* argv[]) {
 // generate metadata encryption keys
   metadata_crypt_header md_header; memset(&md_header, 0, sizeof(md_header));
   memcpy(&md_header, KEY(keypair_d), sizeof(md_header));
+
+#ifdef NPDRM2
+  memcpy(&md_header, KEY(keypair), sizeof(md_header));
+#endif
 
 // can't generate random without symmetric keys
 /*mpz_t bigriv, bigerk;
@@ -575,9 +632,19 @@ int main(int argc, char* argv[]) {
   AES_set_encrypt_key(&output_self_data[metadata_offset], 128, &aes_key);
   memcpy(iv, &output_self_data[metadata_offset+0x20], 16);
   AES_ctr128_encrypt(&output_self_data[0x40+metadata_offset], &output_self_data[0x40+metadata_offset], get_u64(&(output_self_header.s_shsize))-metadata_offset-0x40, &aes_key, iv, ecount_buf, &num);
+#ifdef NPDRM2
+  AES_set_encrypt_key(KEY(erk), 256, &aes_key);
+  memcpy(iv, KEY(iv), 16);
+  AES_cbc_encrypt(&output_self_data[metadata_offset], &output_self_data[metadata_offset], 0x40, &aes_key, iv, AES_ENCRYPT);
+  u8 d_klic[0x10];
+  AES_set_decrypt_key(KLicenseeDecryptKey, 128, &aes_key);
+  AES_decrypt(npdrm_omac_key1, d_klic, &aes_key);
+  AES_set_encrypt_key(d_klic, 128, &aes_key);
+  memset(iv, 0, sizeof iv);
+  AES_cbc_encrypt(&output_self_data[metadata_offset], &output_self_data[metadata_offset], 0x40, &aes_key, iv, AES_ENCRYPT);
+#else
   memcpy(&output_self_data[metadata_offset], KEY(keypair_e), sizeof(md_header));
-  /*AES_set_encrypt_key(KEY(erk), 256, &aes_key);
-  AES_cbc_encrypt(&output_self_data[metadata_offset], &output_self_data[metadata_offset], 0x40, &aes_key, iv, AES_ENCRYPT);*/
+#endif 
 #else
   printf("NO_CRYPT is enabled...self is broken\n");
 #endif
@@ -586,4 +653,5 @@ int main(int argc, char* argv[]) {
   FILE *output_self_file = fopen(argv[2], "wb");
   fwrite(output_self_data, 1, running_size, output_self_file);
   fclose(output_self_file);
+  return 0;
 }
